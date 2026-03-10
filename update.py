@@ -3,7 +3,12 @@ import urllib.request
 
 SOURCE_URL = "https://fxhu.kripod.dev/api/v1/symbols/CNYHUF.json"
 
-with urllib.request.urlopen(SOURCE_URL) as response:
+req = urllib.request.Request(
+    SOURCE_URL,
+    headers={"User-Agent": "Mozilla/5.0"}
+)
+
+with urllib.request.urlopen(req) as response:
     data = json.load(response)
 
 latest_date = sorted(data.keys())[-1]
