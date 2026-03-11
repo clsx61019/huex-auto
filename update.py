@@ -14,9 +14,17 @@ req = urllib.request.Request(
 )
 
 with urllib.request.urlopen(req) as response:
-    data = json.load(response)
+    raw = response.read().decode("utf-8")
+    print("RAW RESPONSE:")
+    print(raw[:1000])  # 先打印前1000个字符看看
+    data = json.loads(raw)
 
-latest_date = sorted(data.keys())[-1]
+dates = sorted(data.keys())
+print("ALL DATES:")
+print(dates)
+print("LATEST DATE FROM ACTIONS:", dates[-1])
+
+latest_date = dates[-1]
 latest_value = data[latest_date]
 
 result = {
