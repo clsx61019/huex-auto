@@ -1,11 +1,16 @@
 import json
 import urllib.request
+import time
 
-SOURCE_URL = "https://fxhu.kripod.dev/api/v1/symbols/CNYHUF.json"
+SOURCE_URL = f"https://fxhu.kripod.dev/api/v1/symbols/CNYHUF.json?t={int(time.time())}"
 
 req = urllib.request.Request(
     SOURCE_URL,
-    headers={"User-Agent": "Mozilla/5.0"}
+    headers={
+        "User-Agent": "Mozilla/5.0",
+        "Cache-Control": "no-cache",
+        "Pragma": "no-cache"
+    }
 )
 
 with urllib.request.urlopen(req) as response:
