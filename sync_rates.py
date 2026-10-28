@@ -1,18 +1,22 @@
 """把匈牙利央行（MNB）公布的 CNY→HUF 官方汇率同步到简道云「辅助：历史汇率」表。
 
 每次运行都会：
-  1. 从 MNB 官网接口取 START_DATE 至今的全部汇率（失败时改用 fxhu 镜像）；
-  2. 读出简道云表里已有的全部日期；
+  1. 从 MNB 官网接口取核对范围内的汇率（失败时改用 fxhu 镜像）；
+  2. 读出简道云表里同一范围内已有的日期；
   3. 把缺的日期补进去（所以哪天没跑成功，下一次运行会自动补上）；
   4. 再读一遍简道云核对，仍有缺失则让任务失败（GitHub 会发邮件提醒）；
   5. 把最新一天写进 data.json。
 
+核对范围：日常只看最近 LOOKBACK_DAYS 天；FULL_CHECK=1 时从 START_DATE 起全部核对。
+
 环境变量：
-  JDY_API_KEY   简道云开放平台 API Key（必填，DRY_RUN 时可不填）
-  JDY_APP_ID    应用 ID，默认「签证管理」
-  JDY_ENTRY_ID  表单 ID，默认「辅助：历史汇率」
-  START_DATE    从哪天开始核对，默认 2025-01-01
-  DRY_RUN       设为 1 时只打印要补的数据，不写简道云
+  JDY_API_KEY    简道云开放平台 API Key（必填，DRY_RUN 时可不填）
+  JDY_APP_ID     应用 ID，默认「签证管理」
+  JDY_ENTRY_ID   表单 ID，默认「辅助：历史汇率」
+  START_DATE     全面检查的起始日期，默认 2025-01-01
+  LOOKBACK_DAYS  日常检查往回看的天数，默认 60
+  FULL_CHECK     设为 1 时做全面检查
+  DRY_RUN        设为 1 时只打印要补的数据，不写简道云
 """
 
 import datetime as dt
@@ -33,10 +37,18 @@ FIELD_RATE = "_widget_1775045148283"
 # 简道云里已有的日期都按 UTC+2 的零点存储（例如 2026-10-27 存成 2026-10-26T22:00:00Z），保持一致
 JDY_TZ = dt.timezone(dt.timedelta(hours=2))
 
+def env_flag(name):
+    return os.environ.get(name, "").lower() in ("1", "true", "yes")
+
+
 START_DATE = os.environ.get("START_DATE") or "2025-01-01"
-DRY_RUN = os.environ.get("DRY_RUN", "").lower() in ("1", "true", "yes")
+LOOKBACK_DAYS = int(os.environ.get("LOOKBACK_DAYS") or 60)
+FULL_CHECK = env_flag("FULL_CHECK")
+DRY_RUN = env_flag("DRY_RUN")
 # 最新官方汇率超过这么多天没更新，就认为数据源出了问题
 MAX_STALE_DAYS = 10
+# 日常检查一次发现这么多天缺失，多半是查询出了问题而不是真缺，先停下来避免重复写入
+MAX_MISSING_IN_WINDOW = 15
 
 MNB_URL = "http://www.mnb.hu/arfolyamok.asmx"
 FXHU_URL = "https://fxhu.kripod.dev/api/v1/symbols/CNYHUF.json"
@@ -134,14 +146,25 @@ def from_jdy_datetime(value):
     return utc.astimezone(JDY_TZ).date().isoformat()
 
 
-def list_jdy_records():
-    """读出表里全部记录，返回 {日期: [(data_id, 汇率), ...]}。"""
+def list_jdy_records(since, until):
+    """读出日期在 [since, until] 内的记录，返回 {日期: [(data_id, 汇率), ...]}。"""
     records, cursor = {}, None
     while True:
         payload = {
             "app_id": JDY_APP_ID,
             "entry_id": JDY_ENTRY_ID,
             "fields": [FIELD_DATE, FIELD_RATE],
+            "filter": {
+                "rel": "and",
+                "cond": [
+                    {
+                        "field": FIELD_DATE,
+                        "type": "datetime",
+                        "method": "range",
+                        "value": [to_jdy_datetime(since), to_jdy_datetime(until)],
+                    }
+                ],
+            },
             "limit": 100,
         }
         if cursor:
@@ -150,7 +173,8 @@ def list_jdy_records():
         for row in page:
             if row.get(FIELD_DATE):
                 day = from_jdy_datetime(row[FIELD_DATE])
-                records.setdefault(day, []).append((row["_id"], row.get(FIELD_RATE)))
+                if since <= day <= until:
+                    records.setdefault(day, []).append((row["_id"], row.get(FIELD_RATE)))
         if len(page) < 100:
             return records
         cursor = page[-1]["_id"]
@@ -182,7 +206,15 @@ def write_summary(lines):
 
 def main():
     today = dt.datetime.now(JDY_TZ).date()
-    rates = fetch_official_rates(START_DATE, today.isoformat())
+    end = today.isoformat()
+    if FULL_CHECK:
+        start = START_DATE
+        print(f"全面检查：{start} ~ {end}")
+    else:
+        start = max(START_DATE, (today - dt.timedelta(days=LOOKBACK_DAYS)).isoformat())
+        print(f"日常检查：最近 {LOOKBACK_DAYS} 天（{start} ~ {end}）")
+
+    rates = fetch_official_rates(start, end)
     if not rates:
         raise RuntimeError("两个数据源都没有取到汇率")
 
@@ -198,8 +230,8 @@ def main():
         print("DRY_RUN 且没有 JDY_API_KEY，跳过简道云核对")
         return
 
-    existing = list_jdy_records()
-    print(f"简道云已有 {sum(len(v) for v in existing.values())} 条记录，覆盖 {len(existing)} 天")
+    existing = list_jdy_records(start, end)
+    print(f"简道云该范围内有 {sum(len(v) for v in existing.values())} 条记录，覆盖 {len(existing)} 天")
 
     missing = sorted(d for d in rates if d not in existing)
     duplicates = sorted(d for d, rows in existing.items() if len(rows) > 1)
@@ -210,6 +242,7 @@ def main():
 
     summary = [
         "## 汇率同步结果",
+        f"- 核对范围：{start} ~ {end}（{'全面检查' if FULL_CHECK else '日常检查'}）",
         f"- 官方最新：**{latest} = {rates[latest]}**",
         f"- 简道云缺失并已补上：{len(missing)} 天" + (f"（{', '.join(missing)}）" if missing else ""),
     ]
@@ -222,11 +255,16 @@ def main():
 
     if missing:
         print(f"需要补 {len(missing)} 天：{missing}")
+        if not FULL_CHECK and len(missing) > MAX_MISSING_IN_WINDOW:
+            raise RuntimeError(
+                f"日常检查发现 {len(missing)} 天缺失，数量异常，未写入。"
+                "请先手动运行一次全面检查（可勾选只检查不写入）确认情况"
+            )
         if DRY_RUN:
             print("DRY_RUN：不写入")
         else:
             create_jdy_records([(d, rates[d]) for d in missing])
-            still_missing = sorted(set(rates) - set(list_jdy_records()))
+            still_missing = sorted(set(rates) - set(list_jdy_records(start, end)))
             if still_missing:
                 raise RuntimeError(f"写入后仍缺少：{still_missing}")
             print("核对通过，简道云已完整")

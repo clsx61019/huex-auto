@@ -7,13 +7,19 @@ on:
         description: "只检查不写入简道云"
         type: boolean
         default: false
-  # MNB 每个工作日中午（布达佩斯时间）公布汇率。一天跑 4 次：
-  # 每次都会核对全部历史并补齐，哪次没跑成或被 GitHub 延迟都没关系
+      full_check:
+        description: "全面检查（从 2025-01-01 起全部核对）"
+        type: boolean
+        default: false
+  # MNB 每个工作日中午（布达佩斯时间）公布汇率。一天跑 4 次，
+  # 每次核对最近 60 天并补齐，哪次没跑成或被 GitHub 延迟都没关系。
+  # 每月 1 日另做一次全面检查。
   schedule:
     - cron: "23 11 * * *"
     - cron: "23 14 * * *"
     - cron: "23 17 * * *"
     - cron: "23 21 * * *"
+    - cron: "47 3 1 * *"
 
 permissions:
   contents: write
@@ -36,6 +42,7 @@ jobs:
         env:
           JDY_API_KEY: ${{ secrets.JDY_API_KEY }}
           DRY_RUN: ${{ inputs.dry_run && '1' || '' }}
+          FULL_CHECK: ${{ (inputs.full_check || github.event.schedule == '47 3 1 * *') && '1' || '' }}
 
       - name: Commit data.json if changed
         run: |
